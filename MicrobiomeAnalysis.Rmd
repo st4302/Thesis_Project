@@ -1,0 +1,1177 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+#Import packages
+library(tidyverse)
+library(phyloseq)
+library(taxize)
+library(ape)
+library(cluster)
+library(ComplexHeatmap)
+suppressPackageStartupMessages(library(curatedMetagenomicData))
+library(matrixStats)
+library(pheatmap)
+library(circlize)
+library(dplyr) 
+library(ggplot2)
+library(ggpubr)
+theme_set(theme_pubclean())
+```
+
+```{r}
+## Set up the wd and load required data
+
+knitr::opts_chunk$set(root.dir = wd)
+setwd("~/Project/MIsnf/Submit")
+wd = getwd()
+
+
+#MI_metaphlan <- read.table(paste0("MI/MI_metaphlan_merged_abundance_table.txt"), sep = "\t", header = T)
+#MI_sample <- read.table(paste0("MI/MI_sample_info2.txt"), sep = "\t", header = T)
+#taxa <- read.csv(file = 'MI/taxa.csv')
+
+#Import files
+MI_metaphlan <- read.table(paste0(wd,"/MI_metaphlan_merged_abundance_table.txt"), sep = "\t", header = T)
+MI_sample <- read.table(paste0(wd,"/MI_sample_info2.txt"), sep = "\t", header = T)
+taxa <- read.csv(file = 'taxa.csv')
+Pathway <- read.csv(paste0(wd,"/pathwayabudance_stratified-cpm.tsv"), sep = "\t", header = T)
+
+#Create taxa table which I saved so I can just upload next time
+#Remove s__
+#Metaplhantaxa <- lapply(MI_metaphlan[,1], gsub, pattern='s__', replacement='')
+
+#Add taxa info
+#specieslist <- Metaplhantaxa
+#taxa <- tax_name(query = c(Metaplhantaxa), get = c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species"), db = "ncbi")
+#write.csv(taxa,'taxa.csv')
+
+#MI_metaphlan from above/counts per million
+otu=MI_metaphlan
+otu2 <- otu[,2:ncol(otu)] *1000000
+otu2 = round(otu2)
+any(is.na(otu)) #there are no Nas
+otu <- cbind (otu$ï..ID, otu2) #otu <- cbind (otu$ID, otu2) for big purple
+
+
+#clean up taxa, make one string
+taxa$Domain="Bacteria"
+taxa$otu=paste(taxa$Domain, taxa$Phylum, taxa$Class, taxa$Order,
+                taxa$Family, taxa$Genus, taxa$Species, sep="; ") 
+
+#clean up otu table
+colnames(otu)[1]<-"SampleID" #change to sample ID
+otu$SampleID=as.character(taxa$otu)
+
+#column names of otu table need to match metadata (MI_sample) remove X and extra text
+colnames(otu) = gsub("X", "", colnames(otu)) #why do we remove and then add?
+colnames(otu) = gsub("_metagenome_bac_species", "", colnames(otu))
+
+ # MI sample IDs that start with "16" are missing a zero before it, clean here
+#MI_sample$SampleID=as.character(MI_sample$X.Sample.)  ##error
+MI_sample$SampleID=as.character(MI_sample$ï..Sample)  
+
+for(i in 1:nrow(MI_sample)){
+  if(substr(MI_sample$SampleID[i], 1,1)=="1"){
+    MI_sample$SampleID[i]=paste0("0", MI_sample$SampleID[i])
+  }
+} 
+
+length(intersect(colnames(otu), MI_sample$SampleID)) #check that the IDs intersect, they do, 1359 match
+rownames(MI_sample)=as.character(MI_sample$SampleID)
+ 
+#force otu table to be in the same column order as MI_sample row order REQUIRED FOR PHYLOSEQ
+
+otu_filt=data.frame(SampleID=otu[,1], otu[,rownames(MI_sample)])
+
+rownames(MI_sample)=paste0("X", rownames(MI_sample)) #clean up rownames since an X is added automatically in otu_filt
+
+#clean up taxa
+
+taxa_filt=taxa[,c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species")] 
+
+rownames(taxa_filt)=make.unique(as.character(taxa$otu))
+
+#match otu filt and taxa filt so row names are both in the same order and match!
+
+otu_filt$SampleID=make.unique(otu_filt$SampleID)
+
+taxa_filt=taxa_filt[as.character(otu_filt$SampleID),]
+
+#clean rownames
+
+rownames(otu_filt)=otu_filt$SampleID
+
+# from tutorial, worked
+
+otu_mat<- as.matrix(otu_filt[,-1])
+
+tax_mat<- as.matrix(taxa_filt)
+
+
+#transform data to phyloseq objects
+
+phylo_OTU<- otu_table(otu_mat, taxa_are_rows = TRUE)
+
+phylo_TAX<- tax_table(tax_mat)
+
+phylo_samples<- sample_data(MI_sample)
+
+ 
+#and put them in one object
+
+phylo_object<- phyloseq(phylo_OTU, phylo_TAX, phylo_samples) 
+
+
+###WORKS###
+```
+
+```{r}
+#Remove OTUs that do not appear more than 2 times in more than 5% of the samples
+wh0 = genefilter_sample(phylo_object, filterfun_sample(function(x) x > 2), A=0.05*nsamples(phylo_object)) #[1:515]
+#dim(phylo_object)
+#phylo_object
+P.chl = prune_taxa(wh0, phylo_object)
+P.chl
+
+#Transform to even sampling depth.
+P.chl = transform_sample_counts(P.chl, function(x) 1E6 * x/sum(x)) 
+#Keep only samples from visit 1
+P.chl = subset_samples(P.chl, VisitId=="V1") #212x938
+
+
+# Extract abundance matrix from the phyloseq object
+OTU1 = as(otu_table(P.chl), "matrix")
+# Coerce to data.frame
+OTUdf = as.data.frame(OTU1)
+#write.csv(OTUdf, "OTUdf.csv")
+
+sample_names(P.chl)[1:5]
+tax_table(P.chl)[1:5, 1:4]
+#####WORKS####
+
+#Let’s start by plotting just the OTUs, and shading the points by Phylum. 
+
+GP.ord <- ordinate(P.chl, "NMDS", "bray") #takes a long time to run
+png("MI/Figures040321/p1NMDS.png", height = 5 , width = 7, units="in", res=150)
+p1 = plot_ordination(P.chl, GP.ord, type="taxa", color="Phylum", title="taxa")
+p1 = plot_ordination(P.chl, GP.ord, type="taxa", color="Phylum")
+print(p1) 
+png("MI/Figures040321/p1facetNMDS.png", height = 5 , width = 7, units="in", res=150)
+p1 + facet_wrap(~Phylum, 3)
+dev.off()
+
+
+
+#PCoA
+phylo_rel_pcoa2<- ordinate(P.chl, method = "PCoA", distance = "bray")
+png("MI/Figures040321/p2PCoA.png", height = 5 , width = 7, units="in", res=150)
+p2 = plot_ordination(P.chl, phylo_rel_pcoa2,
+                type="taxa", color="Phylum") +
+  theme_bw() # #separation between bacteroidetes and firmicites
+p2
+png("MI/Figures040321/p2facetPCoA.png", height = 5 , width = 7, units="in", res=150)
+p2 + facet_wrap(~Phylum, 3)
+dev.off()
+
+
+#Next, let’s plot only the samples, and shade the points by “SampleType”. There are a few additional ggplot2 layers added to make the plot even nicer…
+
+png("MI/Figures040321/p3NMDS.png", height = 5 , width = 7, units="in", res=150)
+p3 = plot_ordination(P.chl, GP.ord, type="samples", color="SEX") 
+p3 + geom_point(size=2) + ggtitle("SEX")
+#p3 + geom_point(size=1) 
+  #geom_polygon(aes(fill=SEX)) + 
+dev.off()
+
+png("MI/Figures040321/p4NMDS.png", height = 5 , width = 7, units="in", res=150)
+p4 = plot_ordination(P.chl, GP.ord, type="samples", color="AGE") 
+p4 + geom_point(size=2) 
+#geom_polygon(aes(fill=AGE))
+dev.off()
+
+png("MI/Figures040321/p5PCoA.png", height = 5 , width = 7, units="in", res=150)
+p5 = plot_ordination(P.chl, phylo_rel_pcoa2, type="samples", color="SEX") 
+p5 + geom_point(size=2)
+#geom_polygon(aes(fill=SEX))
+dev.off()
+
+png("MI/Figures040321/p6PCoA.png", height = 5 , width = 7, units="in", res=150)
+p6 = plot_ordination(P.chl, phylo_rel_pcoa2, type="samples", color="AGE") 
+p6 + geom_point(size=2) 
+#geom_polygon(aes(fill=AGE)) 
+dev.off()
+
+#The plot_ordination function can also automatically create two different graphic layouts in which both the samples and OTUs are plotted together in one “biplot”. Note that this requires methods that are not intrinsically samples-only ordinations. For example, this doesn’t work with UniFrac/PCoA.
+###NMDS##########
+
+png("MI/Figures040321/p7NMDS.png", height = 10 , width = 15, units="in", res=150)
+p7 = plot_ordination(P.chl, GP.ord, type="split", color="AGE", shape="Phylum", title="biplot")
+# Some stuff to modify the automatic shape scale
+P.chl.shape.names = get_taxa_unique(P.chl, "Phylum")
+P.chl.shape <- 15:(15 + length(P.chl.shape.names) - 1)
+names(P.chl.shape) <- P.chl.shape.names
+P.chl.shape["samples"] <- 16
+p7 + scale_shape_manual(values=P.chl.shape)
+dev.off()
+
+
+#png("MI/Figures040321/p7NMDS.png", height = 10 , width = 15, units="in", res=150)
+#p7 = plot_ordination(P.chl, GP.ord, type="split", color="AGE", shape="Phylum", label="SEX", title="biplot")
+# Some stuff to modify the automatic shape scale
+#P.chl.shape.names = get_taxa_unique(P.chl, "Phylum")
+#P.chl.shape <- 15:(15 + length(P.chl.shape.names) - 1)
+#names(P.chl.shape) <- P.chl.shape.names
+#P.chl.shape["samples"] <- 16
+#p7 + scale_shape_manual(values=P.chl.shape)
+#dev.off()
+
+png("MI/Figures040321/p8NMDS.png", height = 10 , width = 15, units="in", res=150)
+p8 = plot_ordination(P.chl, GP.ord, type="split", color="Phylum", shape="SEX", title="split") 
+p8
+dev.off()
+
+#png("MI/Figures040321/p8NMDS.png", height = 10 , width = 15, units="in", res=150)
+#p8 = plot_ordination(P.chl, GP.ord, type="split", color="Phylum", shape="SEX", label="AGE", title="split") 
+#p8
+#dev.off()
+
+#png("MI/Figures032921/p8NMDS.png", height = 5 , width = 7, units="in", res=150)
+#p9 = plot_ordination(P.chl, GP.ord, type="samples", color="AGE", label="SEX", title="Samples") 
+#p9
+
+#png("MI/Figures032921/p8NMDS.png", height = 5 , width = 7, units="in", res=150)
+#p9 = plot_ordination(P.chl, GP.ord, type="samples", color="SEX", label="AGE", title="Samples") 
+#p9
+
+
+####PCoA####
+#png("MI/Figures040321/p9PCOA.png", height = 10 , width = 15, units="in", res=150)
+#p9 = plot_ordination(P.chl, phylo_rel_pcoa2, type="split", color="AGE", shape="Phylum",label="SEX", title="biplot")
+# Some stuff to modify the automatic shape scale
+#P.chl.shape.names = get_taxa_unique(P.chl, "Phylum")
+#P.chl.shape <- 15:(15 + length(P.chl.shape.names) - 1)
+#names(P.chl.shape) <- P.chl.shape.names
+#P.chl.shape["samples"] <- 16
+#p9 + scale_shape_manual(values=P.chl.shape)
+#dev.off()
+
+png("MI/Figures040321/p9PCOA.png", height = 10 , width = 15, units="in", res=150)
+p9 = plot_ordination(P.chl, phylo_rel_pcoa2, type="split", color="AGE", shape="Phylum", title="biplot")
+# Some stuff to modify the automatic shape scale
+P.chl.shape.names = get_taxa_unique(P.chl, "Phylum")
+P.chl.shape <- 15:(15 + length(P.chl.shape.names) - 1)
+names(P.chl.shape) <- P.chl.shape.names
+P.chl.shape["samples"] <- 16
+p9 + scale_shape_manual(values=P.chl.shape)
+dev.off()
+
+png("MI/Figures040321/p10NMDS.png", height = 10 , width = 15, units="in", res=150)
+p10 = plot_ordination(P.chl, phylo_rel_pcoa2, type="split", color="Phylum", shape="SEX", title="split") 
+p10
+dev.off()
+
+#png("MI/Figures040321/p10NMDS.png", height = 10 , width = 15, units="in", res=150)
+#p10 = plot_ordination(P.chl, phylo_rel_pcoa2, type="split", color="Phylum", shape="SEX", label="AGE", title="split") 
+#p10
+#dev.off()
+
+###BAR PLOTS
+png("MI/Figures040321/p11.png", height = 5 , width = 7, units="in", res=150)
+title = "plot_bar; Abundance"
+p11 <- plot_bar(P.chl, x= "SEX", fill="Phylum", title=title) + 
+  geom_bar(aes(color=Phylum, fill=Phylum), stat="identity")  
+p11  ### add this to the code to avoid black boxes
+dev.off
+
+png("MI/Figures040321/p12bacteroidetes.png", height = 5 , width = 7, units="in", res=150)
+p12 <- plot_bar(P.chl, x= "AGE", fill="Phylum", title=title) + 
+  geom_bar(aes(color=Phylum, fill=Phylum), stat="identity")  
+p12  ### add this to the code to avoid black boxes
+dev.off
+
+##Subset for Bacteroidetes
+phylo_object3 = subset_taxa(P.chl, Phylum=="Bacteroidetes")
+title2 = "Bacteroidetes"
+png("MI/Figures040321/p13bacteroidetes.png", height = 10 , width = 7, units="in", res=150)
+p13 <- plot_bar(phylo_object3, x= "AGE", fill="Family", title=title2) + 
+  geom_bar(aes(color=Family, fill=Family), stat="identity")  
+p13  ### add this to the code to avoid black boxes
+dev.off()
+
+png("MI/Figures040321/p14bacteroidetes.png", height = 10 , width = 7, units="in", res=150)
+p14 <- plot_bar(phylo_object3, x= "SEX", fill="Family", title=title2) + 
+  geom_bar(aes(color=Family, fill=Family), stat="identity")  
+p14  ### add this to the code to avoid black boxes
+dev.off
+
+##Subset for Firmicutes
+phylo_object4 = subset_taxa(P.chl, Phylum=="Firmicutes")
+png("MI/Figures040321/p15bacteroidetes.png", height = 10 , width = 7, units="in", res=150)
+title3 = "Firmicutes-only"
+p15 <- plot_bar(phylo_object4, x= "AGE", fill="Family", title=title3) + 
+  geom_bar(aes(color=Family, fill=Family), stat="identity")  
+p15  ### add this to the code to avoid black boxes
+dev.off
+
+png("MI/Figures040321/p16bacteroidetes.png", height = 10 , width = 7, units="in", res=150)
+p16 <- plot_bar(phylo_object4, x= "SEX", fill="Family", title=title3) + 
+  geom_bar(aes(color=Family, fill=Family), stat="identity")  
+p16  ### add this to the code to avoid black boxes
+dev.off()
+
+#Ordination
+phylo = ordinate(P.chl, method="MDS", distance="jsd")
+#Compute Gap statistic
+pam1 = function(x, k){list(cluster = pam(x,k, cluster.only=TRUE))}
+x = phyloseq:::scores.pcoa(phylo, display="sites")
+#gskmn = clusGap(x[, 1:2], FUN=kmeans, nstart=20, K.max = 6, B = 500)
+gskmn = clusGap(x[, 1:2], FUN=pam1, K.max = 6, B = 50)
+gskmn
+
+
+gap_statistic_ordination = function(ord, FUNcluster, type="sites", K.max=6, axes=c(1:2), B=500, verbose=interactive(), ...){
+    require("cluster")
+    #   If "pam1" was chosen, use this internally defined call to pam
+    if(FUNcluster == "pam1"){
+        FUNcluster = function(x,k) list(cluster = pam(x, k, cluster.only=TRUE))     
+    }
+    # Use the scores function to get the ordination coordinates
+    x = phyloseq:::scores.pcoa(ord, display=type)
+    #   If axes not explicitly defined (NULL), then use all of them
+    if(is.null(axes)){axes = 1:ncol(x)}
+    #   Finally, perform, and return, the gap statistic calculation using cluster::clusGap  
+    clusGap(x[, axes], FUN=FUNcluster, K.max=K.max, B=B, verbose=verbose, ...)
+}
+
+plot_clusgap = function(clusgap, title="Gap Statistic calculation results"){
+    require("ggplot2")
+    gstab = data.frame(clusgap$Tab, k=1:nrow(clusgap$Tab))
+    p = ggplot(gstab, aes(k, gap)) + geom_line() + geom_point(size=5)
+    p = p + geom_errorbar(aes(ymax=gap+SE.sim, ymin=gap-SE.sim))
+    p = p + ggtitle(title)
+    return(p)
+}
+
+png("MI/Figures040321/p17GAP.png", height = 5 , width = 7, units="in", res=150)
+gs = gap_statistic_ordination(phylo, "pam1", B=50, verbose=FALSE)
+print(gs, method="Tibs2001SEmax")
+plot_clusgap(gs)
+p17 = plot(gs, main = "Gap statistic for the 'MI' data") #It looks like the data cannot cluster very well. Maybe we can get 2 clusters?
+#mtext("Looks like 2 clusters is best or no cluster.")  
+dev.off
+
+
+
+```
+
+```{r}
+#https://rpubs.com/lgschaerer/515637 
+#ALpha Diversity
+sample_labels <- c("M" = "M", "F" = "F")
+
+sample_types <- c("M", "F")
+
+sample_colors <- c("M" = "lightgoldenrod", "F" = "darkorange")
+png("MI/Figures040321/p18alpha.png", height = 5 , width = 7, units="in", res=150)
+phylo_object %>%     #why can i not use P.chl there?                                                         #phyloseq object
+  plot_richness(
+    x = "SEX",                                                #compare diversity of datatype
+    measures = c("Observed", "Shannon")) +                           #choose diversity measures
+  geom_violin(aes(fill = SEX), show.legend = FALSE)+          #make violin plot, set fill aes to sampletype
+  geom_boxplot(width=0.1) +                                          #add boxplot, set width
+  theme_classic()+                                                   #change theme to classic
+  xlab(NULL)+                                                        #no label on x-axis
+  theme(axis.text.y.left = element_text(size = 20),                  #adjust y-axis text
+        axis.text.x = element_text(size = 20, hjust = 0.5, vjust = 1, angle = 0),           #adjust x-axis label position
+        axis.title.y = element_text(size = 20))+                     #adjust y-axis title
+  theme(strip.text = element_text(face = "bold", size = 25))+        #adjust headings
+  scale_fill_manual(values = sample_colors)+   #set fill colors
+  scale_x_discrete(                                                  #change x-axis labels
+    breaks = sample_types, 
+    labels = sample_labels)+                   
+  ggtitle("Alpha Diversity") +                                       #add title
+  theme(plot.title=element_text(size = 25, face = "bold", hjust = 0.5)) #c
+dev.off
+
+##Proportion of community
+phylumabundance <- P.chl %>%
+  tax_glom(taxrank = "Phylum") %>%                     # agglomerate at phylum level
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% # Transform to rel. abundance
+  psmelt() %>%                                         # Melt to long format
+  arrange(Phylum) 
+head(phylumabundance)
+
+
+all <- phylumabundance %>%
+  select(Phylum, AGE, Abundance, SEX) %>%
+  group_by(Phylum, AGE, SEX) %>%
+  summarize(
+    avg_abundance = mean(Abundance)
+  ) %>%
+  filter(avg_abundance > 0.01)
+head(all)
+
+phylum_colors <- c(
+  "#CBD588", "#5F7FC7", "orange","#DA5724", "#508578", "#CD9BCD",
+  "#AD6F3B", "#673770","#D14285", "#652926", "#C84248", 
+  "#8569D5", "#5E738F","#D1A33D", "#8A7C64", "#599861"
+)
+
+png("MI/Figures040321/p19community.png", height = 5 , width = 7, units="in", res=150)
+ggplot(all)+
+  geom_col(mapping = aes(x = AGE, y = avg_abundance, fill = Phylum), position = "fill", show.legend = TRUE)+
+  ylab("Proportion of Community") +
+  scale_fill_manual(values = phylum_colors) +
+  xlab(NULL)+
+  theme_minimal()+
+  theme(axis.text.y.left = element_text(size = 20),
+        axis.text.x = element_text(size = 20, angle = 90, vjust = 0.5, hjust = 1),
+        axis.title.y = element_text(size = 20),
+        title = element_text(size = 25))
+dev.off
+
+png("MI/Figures040321/p20community.png", height = 5 , width = 7, units="in", res=150)
+ggplot(all)+
+  geom_col(mapping = aes(x = SEX, y = avg_abundance, fill = Phylum), position = "fill", show.legend = TRUE)+
+  ylab("Proportion of Community") +
+  scale_fill_manual(values = phylum_colors) +
+  xlab(NULL)+
+  theme_minimal()+
+  theme(axis.text.y.left = element_text(size = 20),
+        axis.text.x = element_text(size = 20, angle = 90, vjust = 0.5, hjust = 1),
+        axis.title.y = element_text(size = 20),
+        title = element_text(size = 25))
+dev.off
+
+genusabundance <- P.chl %>%
+  tax_glom(taxrank = "Class") %>%                     # agglomerate at class level
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% # Transform to rel. abundance
+  psmelt() %>%                                         # Melt to long format
+  arrange(Phylum) 
+head(genusabundance)
+
+allgenus <- genusabundance %>%
+  select(Class, AGE, Abundance, SEX) %>%
+  group_by(Class, AGE, SEX) %>%
+  summarize(
+    avg_abundance = mean(Abundance)
+  ) %>%
+  filter(avg_abundance > 0.01)
+head(allgenus)
+
+phylum_colors <- c(
+  "#CBD588", "#5F7FC7", "orange","#DA5724", "#508578", "#CD9BCD",
+  "#AD6F3B", "#673770","#D14285", "#652926", "#C84248", 
+  "#8569D5", "#5E738F","#D1A33D", "#8A7C64", "#599861"
+)
+
+
+png("MI/Figures040321/p21community.png", height = 5 , width = 7, units="in", res=150)
+ggplot(allgenus)+
+  geom_col(mapping = aes(x = AGE, y = avg_abundance, fill = Class), position = "fill", show.legend = TRUE)+
+  ylab("Proportion of Community") +
+  scale_fill_manual(values = phylum_colors) +
+  xlab(NULL)+
+  theme_minimal()+
+  theme(axis.text.y.left = element_text(size = 20),
+        axis.text.x = element_text(size = 20, angle = 90, vjust = 0.5, hjust = 1),
+        axis.title.y = element_text(size = 20),
+        title = element_text(size = 25))
+dev.off
+
+png("MI/Figures040321/p22community.png", height = 5 , width = 7, units="in", res=150)
+ggplot(allgenus)+
+  geom_col(mapping = aes(x = SEX, y = avg_abundance, fill = Class), position = "fill", show.legend = TRUE)+
+  ylab("Proportion of Community") +
+  scale_fill_manual(values = phylum_colors) +
+  xlab(NULL)+
+  theme_minimal()+
+  theme(axis.text.y.left = element_text(size = 20),
+        axis.text.x = element_text(size = 20, angle = 90, vjust = 0.5, hjust = 1),
+        axis.title.y = element_text(size = 20),
+        title = element_text(size = 25))
+dev.off
+
+
+
+
+
+##Heatmap 50 top variance
+
+nv <- apply(OTU1, MARGIN = 1, FUN = var)
+n_rows = 50
+data_sample = head( OTU1[order(nv, decreasing=TRUE), ], n_rows)
+#heatmap(data_sample, scale = "none")
+png("MI/Figures040321/p23var.png", height = 5 , width = 7, units="in", res=150)
+Heatmap(t(scale(t(data_sample))), 
+        name = "variable", #title of legend
+        column_title = "50 most variable taxa", row_title = "Taxa",
+        show_row_names = FALSE, show_column_names = FALSE,
+        row_names_gp = gpar(fontsize = 7), 
+        col = colorRamp2(c(-3,0,3), c('blue', "white", "red"))
+)
+# Text size for row names
+        
+dev.off
+#ha1 = columnAnnotation(df=data.frame(group=factor(labels[ind]),
+                                #     age = ecrf$Age[ind]))
+
+```
+
+
+
+```{r}
+
+#Cluster microbiome data/ PCoA/ wilcoxon test
+#http://rstudio-pubs-static.s3.amazonaws.com/224764_c9cdf7ea3579478b84e487cc007b90c0.html
+#extract sample data
+samp <- data.frame(sample_data(P.chl))
+suppressPackageStartupMessages(library(cluster))
+
+#dissimilarity matrices
+dist_bray <- distance(P.chl, method = "bray")
+ord_bray <- ordinate(P.chl, method="PCoA", distance=dist_bray)
+plot_ordination(P.chl, ord_bray, color="SEX") + 
+  ggplot2::ggtitle("Bray-Curtis Principal Coordinates Analysis")
+
+#partitioning around medoids
+samp$bray_cluster_2 <- factor(pam(dist_bray, k=2, cluster.only = T))
+samp$bray_cluster_3 <- factor(pam(dist_bray, k=3, cluster.only = T))
+sample_data(P.chl) <- samp
+plot_ordination(P.chl, ord_bray, color="bray_cluster_2") + 
+  ggplot2::ggtitle("PCoA with 2 Clusters") 
+p4 = plot_ordination(P.chl, ord_bray, color="bray_cluster_3") + 
+  ggplot2::ggtitle("PCoA with 3 Clusters")
+p4 
+
+
+#Merge OTUdf2 
+library(data.table)
+#OTUdf2 <- transpose(OTUdf)
+#rownames(OTUdf2) <- colnames(OTUdf)
+#colnames(OTUdf2) <- rownames(OTUdf)
+#OTUdf2 <- saveRDS(OTUdf2, file = "OTUdf2.rds")
+OTUdf2 <- readRDS("OTUdf2.rds")
+
+colnames(samp)[1]<-"MI_sample"
+
+for(i in 1:nrow(samp)){
+  if(substr(samp$SampleID[i], 1,1)=="1"){
+    samp$SampleID[i]=paste0("0", samp$SampleID[i])
+  }
+} 
+
+#order by donorid
+samp$SampleID <- sub("^", "X", samp$SampleID )
+samp2 <- samp[order(samp$DonorId),]
+samp2 <- subset(samp2, select = -c(MI_sample,VisitId,AGE,SEX,DonorId,bray_cluster_2))
+length(intersect(colnames(OTUdf2), samp2$SampleID)) #938
+micro <- merge(OTUdf2,samp2,by="SampleID")
+micro <- subset(micro, select = -c(SampleID))
+micro$bray_cluster_3 <- as.numeric(as.character(micro$bray_cluster_3))
+
+
+wilcpvalue1 = apply(micro, 2, function(x){
+  wilcox.test(x[micro[,213] ==1], 
+              x[micro[,213] !=1])$p.value 
+})
+wilcpvalue2 = apply(micro, 2, function(x){
+  wilcox.test(x[micro[,213] ==2], 
+              x[micro[,213] !=2])$p.value 
+})
+wilcpvalue3 = apply(micro, 2, function(x){
+  wilcox.test(x[micro[,213] ==3], 
+              x[micro[,213] !=3])$p.value 
+})
+
+wilc_res <- data.frame(feature=NA, p.val=NA, comp=NA)
+adder1 = data.frame(feature=colnames(micro),
+                         p.val=wilcpvalue1, comp=rep(1, times = ncol(micro)))
+adder1 = adder1[-nrow(adder1),]
+adder2 = data.frame(feature=colnames(micro),
+                         p.val=wilcpvalue2, comp=rep(2, times = ncol(micro)))
+adder2 = adder2[-nrow(adder2),]
+adder3= data.frame(feature=colnames(micro),
+                         p.val=wilcpvalue3, comp=rep(3, times = ncol(micro)))
+adder3 = adder3[-nrow(adder3),]
+wilc_res <- rbind(wilc_res, adder1, adder2, adder3)
+wilc_res=wilc_res[-1,]
+wilc_res=wilc_res[order(wilc_res$p.val, decreasing=F),]
+wilc_df=wilc_res %>% # take the dataframe
+    group_by(comp) %>% # group it by the grouping variable
+    slice(1:5) # and pick highest 5                                           
+#wilc_df <- saveRDS(wilc_df, file = "wilc_dfv1.rds")
+#wilc_res <- saveRDS(wilc_res, file = "wilc_res.rds")
+wilc_df=readRDS("wilc_dfv1.rds")
+
+#Boxplots #Bact_uniformis
+Bacteroides_uniformis <- select(micro,contains("Bacteroides uniformis"))
+Bacteroides_uniformis <- cbind(Bacteroides_uniformis, bray_cluster_3=micro$bray_cluster_3)
+names(Bacteroides_uniformis)[names(Bacteroides_uniformis) == "Bacteria; Bacteroidetes; Bacteroidia; Bacteroidales; Bacteroidaceae; Bacteroides; Bacteroides uniformis"] <- "Bacteroides_uniformis"
+names(Bacteroides_uniformis)[names(Bacteroides_uniformis) == "bray_cluster_3"] <- "Cluster"
+
+
+e <- ggplot(Bacteroides_uniformis, aes(x = Cluster, y = Bacteroides_uniformis, fill = Cluster))
+e + geom_boxplot(aes(group = Cluster)) +
+  scale_color_brewer(palette="Dark2") +
+   theme(legend.position="none")
+
+
+#Boxplots #Bact_uniformis
+Alistipes_putredinis <- select(micro,contains("Alistipes putredinis"))
+Alistipes_putredinis <- cbind(Alistipes_putredinis, bray_cluster_3=micro$bray_cluster_3)
+Alistipes_putredinis$bray_cluster_3 <- factor(Alistipes_putredinis$bray_cluster_3)
+names(Alistipes_putredinis)[names(Alistipes_putredinis) == "Bacteria; Bacteroidetes; Bacteroidia; Bacteroidales; Rikenellaceae; Alistipes; Alistipes putredinis"] <- "Alistipes_putredinis"
+names(Alistipes_putredinis)[names(Alistipes_putredinis) == "bray_cluster_3"] <- "Cluster"
+
+e <- ggplot(Alistipes_putredinis, aes(x = Cluster, y = Alistipes_putredinis, fill = Cluster))
+e + geom_boxplot(aes(group = Cluster)) +
+  scale_color_brewer(palette="Dark2") + 
+  theme(legend.position="none")+ 
+  ggtitle("Alistipes putredinis") 
+      
+
+e + geom_boxplot(aes(group = Cluster)) +
+  scale_color_brewer(palette="Dark2") +
+   theme(legend.position="none")
+
+#Boxplots #Bact_uniformis
+Dorea_longicatena <- select(micro,contains("Dorea longicatena"))
+Dorea_longicatena <- cbind(Dorea_longicatena, bray_cluster_3=micro$bray_cluster_3)
+Dorea_longicatena$bray_cluster_3 <- factor(Dorea_longicatena$bray_cluster_3)
+names(Dorea_longicatena)[names(Dorea_longicatena) == "Bacteria; Firmicutes; Clostridia; Eubacteriales; Lachnospiraceae; Dorea; Dorea longicatena"] <- "Dorea_longicatena"
+names(Dorea_longicatena)[names(Dorea_longicatena) == "bray_cluster_3"] <- "Cluster"
+
+
+e <- ggplot(Dorea_longicatena, aes(x = Cluster, y = Dorea_longicatena, fill = Cluster))
+e + geom_boxplot(aes(group = Cluster)) +
+  scale_color_brewer(palette="Dark2") +
+   theme(legend.position="none")
+
+#Boxplots #Bact_uniformis
+Odoribacter_splanchnicus <- select(micro,contains("Odoribacter splanchnicus"))
+Odoribacter_splanchnicus <- cbind(Odoribacter_splanchnicus, bray_cluster_3=micro$bray_cluster_3)
+Odoribacter_splanchnicus$bray_cluster_3 <- factor(Odoribacter_splanchnicus$bray_cluster_3)
+names(Odoribacter_splanchnicus)[names(Odoribacter_splanchnicus) == "Bacteria; Bacteroidetes; Bacteroidia; Bacteroidales; Odoribacteraceae; Odoribacter; Odoribacter splanchnicus"] <- "Odoribacter_splanchnicus"
+names(Odoribacter_splanchnicus)[names(Odoribacter_splanchnicus) == "bray_cluster_3"] <- "Cluster"
+
+
+e <- ggplot(Odoribacter_splanchnicus, aes(x = Cluster, y = Odoribacter_splanchnicus, fill = Cluster))
+e + geom_boxplot(aes(group = Cluster)) +
+  scale_color_brewer(palette="Dark2") +
+   theme(legend.position="none")
+
+#Boxplots #Bact_uniformis
+Dorea_formicigenerans <- select(micro,contains("Dorea formicigenerans"))
+Dorea_formicigenerans <- cbind(Dorea_formicigenerans, bray_cluster_3=micro$bray_cluster_3)
+Dorea_formicigenerans$bray_cluster_3 <- factor(Dorea_formicigenerans$bray_cluster_3)
+names(Dorea_formicigenerans)[names(Dorea_formicigenerans) == "Bacteria; Firmicutes; Clostridia; Eubacteriales; Lachnospiraceae; Dorea; Dorea formicigenerans"] <- "Dorea_formicigenerans"
+
+e <- ggplot(Dorea_formicigenerans, aes(x = bray_cluster_3, y = Dorea_formicigenerans, fill = bray_cluster_3))
+e + geom_boxplot(aes(group = bray_cluster_3)) +
+  scale_color_brewer(palette="Dark2") +
+   theme(legend.position="none")
+
+
+#Boxplots #Bact_uniformis
+Prevotella_copri <- select(micro,contains("Prevotella copri"))
+Prevotella_copri <- cbind(Prevotella_copri, bray_cluster_3=micro$bray_cluster_3)
+Prevotella_copri$bray_cluster_3 <- factor(Prevotella_copri$bray_cluster_3)
+names(Prevotella_copri)[names(Prevotella_copri) == "Bacteria; Bacteroidetes; Bacteroidia; Bacteroidales; Prevotellaceae; Prevotella; Prevotella copri"] <- "Prevotella_copri"
+names(Prevotella_copri)[names(Prevotella_copri) == "bray_cluster_3"] <- "Cluster"
+
+
+e <- ggplot(Prevotella_copri, aes(x = Cluster, y = Prevotella_copri, fill = Cluster))
+e + geom_boxplot(aes(group = Cluster)) +
+  scale_color_brewer(palette="Dark2") +
+   theme(legend.position="none")+ 
+  ggtitle("Prevotella copri") 
+
+
+#Boxplots #Bact_uniformis
+Phascolarctobacterium_succinatutens <- select(micro,contains("Phascolarctobacterium succinatutens"))
+Phascolarctobacterium_succinatutens <- cbind(Phascolarctobacterium_succinatutens, bray_cluster_3=micro$bray_cluster_3)
+Phascolarctobacterium_succinatutens$bray_cluster_3 <- factor(Phascolarctobacterium_succinatutens$bray_cluster_3)
+names(Phascolarctobacterium_succinatutens)[names(Phascolarctobacterium_succinatutens) == "Bacteria; Firmicutes; Negativicutes; Acidaminococcales; Acidaminococcaceae; Phascolarctobacterium; Phascolarctobacterium succinatutens"] <- "Phascolarctobacterium_succinatutens"
+
+e <- ggplot(Phascolarctobacterium_succinatutens, aes(x = bray_cluster_3, y = Phascolarctobacterium_succinatutens, fill = bray_cluster_3))
+e + geom_boxplot(aes(group = bray_cluster_3)) +
+  scale_color_brewer(palette="Dark2") +
+   theme(legend.position="none")
+
+#Holdemanella biformis
+
+#Boxplots #Bact_uniformis
+Holdemanella_biformis <- select(micro,contains("Holdemanella biformis"))
+Holdemanella_biformis <- cbind(Holdemanella_biformis, bray_cluster_3=micro$bray_cluster_3)
+Holdemanella_biformis$bray_cluster_3 <- factor(Holdemanella_biformis$bray_cluster_3)
+names(Holdemanella_biformis)[names(Holdemanella_biformis) == "Bacteria; Firmicutes; Erysipelotrichia; Erysipelotrichales; Erysipelotrichaceae; Holdemanella; Holdemanella biformis"] <- "Holdemanella_biformis"
+
+e <- ggplot(Holdemanella_biformis, aes(x = bray_cluster_3, y = Holdemanella_biformis, fill = bray_cluster_3))
+e + geom_boxplot(aes(group = bray_cluster_3)) +
+  scale_color_brewer(palette="Dark2") +
+   theme(legend.position="none")
+
+#Boxplots #Bact_uniformis
+Roseburia_inulinivorans <- select(micro,contains("Roseburia inulinivorans"))
+Roseburia_inulinivorans <- cbind(Roseburia_inulinivorans, bray_cluster_3=micro$bray_cluster_3)
+Roseburia_inulinivorans$bray_cluster_3 <- factor(Roseburia_inulinivorans$bray_cluster_3)
+names(Roseburia_inulinivorans)[names(Roseburia_inulinivorans) == "Bacteria; Firmicutes; Clostridia; Eubacteriales; Lachnospiraceae; Roseburia; Roseburia inulinivorans"] <- "Roseburia_inulinivorans"
+
+e <- ggplot(Roseburia_inulinivorans, aes(x = bray_cluster_3, y = Roseburia_inulinivorans, fill = bray_cluster_3))
+e + geom_boxplot(aes(group = bray_cluster_3)) +
+  scale_color_brewer(palette="Dark2") +
+   theme(legend.position="none")
+
+#Boxplots #Bact_uniformis
+Bifidobacterium_longum <- select(micro,contains("Bifidobacterium longum"))
+Bifidobacterium_longum <- cbind(Bifidobacterium_longum, bray_cluster_3=micro$bray_cluster_3)
+Bifidobacterium_longum$bray_cluster_3 <- factor(Bifidobacterium_longum$bray_cluster_3)
+names(Bifidobacterium_longum)[names(Bifidobacterium_longum) == "Bacteria; Actinobacteria; Actinomycetia; Bifidobacteriales; Bifidobacteriaceae; Bifidobacterium; Bifidobacterium longum"] <- "Bifidobacterium_longum"
+names(Bifidobacterium_longum)[names(Bifidobacterium_longum) == "bray_cluster_3"] <- "Cluster"
+
+
+e <- ggplot(Bifidobacterium_longum, aes(x = Cluster, y = Bifidobacterium_longum, fill = Cluster))
+e + geom_boxplot(aes(group = Cluster)) +
+  scale_color_brewer(palette="Dark2") +
+   theme(legend.position="none")+ 
+  ggtitle("Bifidobacterium longum") 
+
+#Boxplots #Bact_uniformis
+Anaerobutyricum_hallii <- select(micro,contains("Anaerobutyricum hallii"))
+Anaerobutyricum_hallii <- cbind(Anaerobutyricum_hallii, bray_cluster_3=micro$bray_cluster_3)
+Anaerobutyricum_hallii$bray_cluster_3 <- factor(Anaerobutyricum_hallii$bray_cluster_3)
+names(Anaerobutyricum_hallii)[names(Anaerobutyricum_hallii) == "Bacteria; Firmicutes; Clostridia; Eubacteriales; Lachnospiraceae; Anaerobutyricum; Anaerobutyricum hallii"] <- "Anaerobutyricum_hallii"
+
+e <- ggplot(Anaerobutyricum_hallii, aes(x = bray_cluster_3, y = Anaerobutyricum_hallii, fill = bray_cluster_3))
+e + geom_boxplot(aes(group = bray_cluster_3)) +
+  scale_color_brewer(palette="Dark2") +
+   theme(legend.position="none")
+
+#Boxplots #Bact_uniformis
+Bifidobacterium_adolescentis <- select(micro,contains("Bifidobacterium adolescentis"))
+Bifidobacterium_adolescentis <- cbind(Bifidobacterium_adolescentis, bray_cluster_3=micro$bray_cluster_3)
+Bifidobacterium_adolescentis$bray_cluster_3 <- factor(Bifidobacterium_adolescentis$bray_cluster_3)
+names(Bifidobacterium_adolescentis)[names(Bifidobacterium_adolescentis) == "Bacteria; Actinobacteria; Actinomycetia; Bifidobacteriales; Bifidobacteriaceae; Bifidobacterium; Bifidobacterium adolescentis"] <- "Bifidobacterium_adolescentis"
+names(Bifidobacterium_adolescentis)[names(Bifidobacterium_adolescentis) == "bray_cluster_3"] <- "Cluster"
+
+e <- ggplot(Bifidobacterium_adolescentis, aes(x = Cluster, y = Bifidobacterium_adolescentis, fill = Cluster))
+e + geom_boxplot(aes(group = Cluster)) +
+  scale_color_brewer(palette="Dark2") +
+   theme(legend.position="none")
+
+#Boxplots #Bact_uniformis
+Ruminococcus <- select(micro,contains("Ruminococcus sp. 5_1_39BFAA"))
+Ruminococcus <- cbind(Ruminococcus, bray_cluster_3=micro$bray_cluster_3)
+Ruminococcus$bray_cluster_3 <- factor(Ruminococcus$bray_cluster_3)
+names(Ruminococcus)[names(Ruminococcus) == "Bacteria; Firmicutes; Clostridia; Eubacteriales; Oscillospiraceae; Ruminococcus; Ruminococcus sp. 5_1_39BFAA"] <- "Ruminococcus"
+
+e <- ggplot(Ruminococcus, aes(x = bray_cluster_3, y = Ruminococcus, fill = bray_cluster_3))
+e + geom_boxplot(aes(group = bray_cluster_3)) +
+  scale_color_brewer(palette="Dark2") +
+   theme(legend.position="none")
+
+#Boxplots #Bact_uniformis
+Collinsella_aerofaciens <- select(micro,contains("Collinsella aerofaciens"))
+Collinsella_aerofaciens <- cbind(Collinsella_aerofaciens, bray_cluster_3=micro$bray_cluster_3)
+Collinsella_aerofaciens$bray_cluster_3 <- factor(Collinsella_aerofaciens$bray_cluster_3)
+names(Collinsella_aerofaciens)[names(Collinsella_aerofaciens) == "Bacteria; Actinobacteria; Coriobacteriia; Coriobacteriales; Coriobacteriaceae; Collinsella; Collinsella aerofaciens"] <- "Collinsella_aerofaciens"
+
+e <- ggplot(Collinsella_aerofaciens, aes(x = bray_cluster_3, y = Collinsella_aerofaciens, fill = bray_cluster_3))
+e + geom_boxplot(aes(group = bray_cluster_3)) +
+  scale_color_brewer(palette="Dark2") +
+   theme(legend.position="none")
+
+
+
+```
+
+```{r}
+#Firmicutes
+
+GPfirm = subset_taxa(P.chl, Phylum=="Firmicutes")
+# Extract abundance matrix from the phyloseq object
+OTUfirm = as(otu_table(GPfirm), "matrix")
+# Coerce to data.frame
+OTUfirmdf = as.data.frame(OTUfirm)
+firmsums <- colSums(OTUfirm)
+sample_data(P.chl)$Z_score_Firmicutes <- scale(sample_sums(GPfirm))
+#PCoA
+phylo_rel_pcoa2<- ordinate(P.chl, method = "PCoA", distance = "bray")
+png("MI/Figures040321/p5PCoA.png", height = 5 , width = 7, units="in", res=150)
+p3 = plot_ordination(P.chl, phylo_rel_pcoa2, type="samples", color="Z_score_Firmicutes") 
+p3 + geom_point(size=1) + ggtitle("Firmicutes") +   scale_color_gradient2(low = "purple", mid = "pink", high = "red") + theme(plot.title = element_text(size=12))
+
+dev.off()
+
+GPbact = subset_taxa(P.chl, Phylum=="Bacteroidetes")
+# Extract abundance matrix from the phyloseq object
+OTUbact = as(otu_table(GPbact), "matrix")
+# Coerce to data.frame
+OTUbactdf = as.data.frame(OTUbact)
+bactscale <- scale(colSums(OTUbact))
+sample_data(P.chl)$Z_score_Bacteroidetes <- scale(sample_sums(GPbact))
+
+
+#PCoA
+phylo_rel_pcoa2<- ordinate(P.chl, method = "PCoA", distance = "bray")
+png("Becteroidetes.png", height = 5 , width = 7, units="in", res=150)
+p1 = plot_ordination(P.chl, phylo_rel_pcoa2, type="samples", color="Z_score_Bacteroidetes") 
+#p1 + geom_point(size=2) + ggtitle("Bacteriodetes") +   scale_color_gradient2(low = "blue", mid = "white", high = "red")
+p1 = plot_ordination(P.chl, phylo_rel_pcoa2, type="samples", color="Z_score_Bacteroidetes") 
+p1 + geom_point(size=1) + ggtitle("Bacteroidetes") +   scale_color_gradient2(low = "purple", mid = "pink", high = "red") + theme(plot.title = element_text(size=12))
+
+
+```
+
+```{r}
+## Plots of categorical values (proportion/number of people)
+ecrf2 <- cbind(ecrf, labels = umap_df$labels)
+hist(ecrf2$BMI)
+plot(ecrf$CMVPositiveSerology)
+
+#Proportion
+
+ggplot(ecrf2, 
+       aes(x = Sex, 
+           fill = labels)) + 
+  geom_bar(position = "fill") +
+  labs(y = "Proportion")
+
+ggplot(ecrf2, 
+       aes(x = CMVPositiveSerology, 
+           fill = labels)) + 
+  geom_bar(position = "fill") +
+  labs(y = "Proportion")
+
+ggplot(ecrf2, 
+       aes(x = OwnsHouse, 
+           fill = labels)) + 
+  geom_bar(position = "fill") +
+  labs(y = "Proportion")
+
+ggplot(ecrf2, 
+       aes(x = LivesWithKids, 
+           fill = labels)) + 
+  geom_bar(position = "fill") +
+  labs(y = "Proportion")
+
+ggplot(ecrf2, 
+       aes(x = BornInCity, 
+           fill = labels)) + 
+  geom_bar(position = "fill") +
+  labs(y = "Proportion")
+
+
+ggplot(ecrf2, 
+       aes(x = Smoking, 
+           fill = labels)) + 
+  geom_bar(position = "fill") +
+  labs(y = "Proportion")
+
+ggplot(ecrf2, 
+       aes(x = UsesCannabis, 
+           fill = labels)) + 
+  geom_bar(position = "fill") +
+  labs(y = "Proportion")
+
+ggplot(ecrf2, 
+       aes(x = DustExposure, 
+           fill = labels)) + 
+  geom_bar(position = "fill") +
+  labs(y = "Proportion")
+
+
+#Number of people
+
+ggplot(ecrf2, 
+       aes(x = Smoking, 
+           fill = labels)) + 
+  geom_bar() +
+  labs(y = "Number of People")
+
+
+ggplot(ecrf2, 
+       aes(x = UsesCannabis, 
+           fill = labels)) + 
+  geom_bar() +
+  labs(y = "Number of People")
+
+
+ggplot(ecrf2, 
+       aes(x = UsesCannabis, 
+           fill = labels)) + 
+  geom_bar() +
+  labs(y = "Number of people")
+
+ggplot(ecrf2, 
+       aes(x = CMVPositiveSerology, 
+           fill = labels)) + 
+  geom_bar(position = "fill") +
+  labs(title="CMVPositiveSerology") +
+  labs(y = "Proportion")
+
+ggplot(ecrf2, 
+       aes(x = VaccineYellowFever, 
+           fill = labels)) + 
+  geom_bar(position = "fill") +
+  labs(title="VaccineYellowFever") +
+  labs(y = "Proportion")
+
+
+table(ecrf2$CMVPositiveSerology)
+table(ecrf2$UsesCannabis)
+table(ecrf2$Smoking)
+
+
+```
+
+```{r}
+###Characterization of cluster 4 within pathway data
+
+facs_resid[,"N_VIABLE_NEUTROPHILS.panel7"]
+N_VIABLE_NEUTL <- data.frame(Feature=NA)
+N_VIABLE_NEUT <- scale(facs_resid[,"N_VIABLE_NEUTROPHILS.panel7"]) 
+N_VIABLE_NEUTL <- N_VIABLE_NEUT+ abs(min(N_VIABLE_NEUT))
+Neutr = data.frame(Feature=N_VIABLE_NEUTL, labels=umap_df$labels)
+
+Pathsnf2[,230]
+Pathrow <- Pathsnf2
+Pathrow$row_names <- row.names(Pathsnf2) 
+
+#Identify samples from cluster 4 in Pathway data
+#Features >=5
+
+#N_VIABLE_NEUTL <- data.frame(Feature=NA)
+path_230 <- scale(Pathsnf2[,230]) 
+path_230 <- path_230+ abs(min(path_230))
+path_230 = data.frame(Feature=path_230, labels=umap_df$labels, ID=Pathrow$row_names)
+#Choose cluster 4, Feature above 5
+pathw <- path_230 %>% filter(labels == 4, Feature >= 5) #only 7 samples
+#ID 196, 486, 501, 507, 691, 745, 934
+
+path_117 <- scale(Pathsnf2[,117]) 
+path_117 <- path_117+ abs(min(path_117))
+path_117 = data.frame(Feature=path_117, labels=umap_df$labels, ID=Pathrow$row_names)
+#Choose cluster 4, Feature above 5
+pathw117 <- path_117 %>% filter(labels == 4, Feature >= 5) #only 6 samples
+#ID 196, 501, 507, 691, 739, 745
+
+path_487 <- scale(Pathsnf2[,487]) 
+path_487 <- path_487+ abs(min(path_487))
+path_487 = data.frame(Feature=path_487, labels=umap_df$labels, ID=Pathrow$row_names)
+#Choose cluster 4, Feature above 5
+pathw487 <- path_487 %>% filter(labels == 4, Feature >= 5) #only 5 samples
+#ID 196, 501, 691, 745, 934
+
+path_914 <- scale(Pathsnf2[,914]) 
+path_914 <- path_914+ abs(min(path_914))
+path_914 = data.frame(Feature=path_914, labels=umap_df$labels, ID=Pathrow$row_names)
+#Choose cluster 4, Feature above 5
+pathw914 <- path_914 %>% filter(labels == 4, Feature >= 5) #only 5 samples
+#ID 196, 501, 507, 691, 745, 934
+
+path_401 <- scale(Pathsnf2[,401]) 
+path_401 <- path_401+ abs(min(path_401))
+path_401 = data.frame(Feature=path_401, labels=umap_df$labels, ID=Pathrow$row_names)
+#Choose cluster 4, Feature above 5
+pathw401 <- path_401 %>% filter(labels == 4, Feature >= 5) #only 5 samples
+#ID 196, 501, 624, 691, 745, 934, 989
+
+ecrf3 <- ecrf2
+ecrf3$row_names <- row.names(ecrf3) 
+ecrf5 <- ecrf3 %>% filter(row_names == 196| row_names == 501| row_names == 691| row_names == 745)
+#similar BMI, no kids, cmv no, low appetite, trouble concentrating, no cannabis, no smoking, nojob, no dust exposure
+saveRDS(ecrf4, file = "pathfeat5.rds")
+
+#Feature >=4.5
+
+#N_VIABLE_NEUTL <- data.frame(Feature=NA)
+path_230 <- scale(Pathsnf2[,230]) 
+path_230 <- path_230+ abs(min(path_230))
+path_230 = data.frame(Feature=path_230, labels=umap_df$labels, ID=Pathrow$row_names)
+#Choose cluster 4, Feature above 5
+pathw230 <- path_230 %>% filter(labels == 4, Feature >= 4.5) #only 13 samples
+#ID 196, 486, 501, 507, 691, 745, 934
+
+path_117 <- scale(Pathsnf2[,117]) 
+path_117 <- path_117+ abs(min(path_117))
+path_117 = data.frame(Feature=path_117, labels=umap_df$labels, ID=Pathrow$row_names)
+#Choose cluster 4, Feature above 5
+pathw117 <- path_117 %>% filter(labels == 4, Feature >= 4.5) #only 12 samples
+#ID 196, 501, 507, 691, 739, 745
+
+path_487 <- scale(Pathsnf2[,487]) 
+path_487 <- path_487+ abs(min(path_487))
+path_487 = data.frame(Feature=path_487, labels=umap_df$labels, ID=Pathrow$row_names)
+#Choose cluster 4, Feature above 5
+pathw487 <- path_487 %>% filter(labels == 4, Feature >= 4.5) #only 15 samples
+#ID 196, 501, 691, 745, 934
+
+path_914 <- scale(Pathsnf2[,914]) 
+path_914 <- path_914+ abs(min(path_914))
+path_914 = data.frame(Feature=path_914, labels=umap_df$labels, ID=Pathrow$row_names)
+#Choose cluster 4, Feature above 5
+pathw914 <- path_914 %>% filter(labels == 4, Feature >= 4.5) #only 13 samples
+#ID 196, 501, 507, 691, 745, 934
+
+path_401 <- scale(Pathsnf2[,401]) 
+path_401 <- path_401+ abs(min(path_401))
+path_401 = data.frame(Feature=path_401, labels=umap_df$labels, ID=Pathrow$row_names)
+#Choose cluster 4, Feature above 5
+pathw401 <- path_401 %>% filter(labels == 4, Feature >= 4.5) #only 14 samples
+#ID 196, 501, 624, 691, 745, 934, 989
+
+ecrf3 <- ecrf2
+ecrf3$row_names <- row.names(ecrf3) 
+ecrf4 <- ecrf3 %>% filter(row_names == 196| row_names == 457 | row_names == 486| row_names == 497| row_names == 501| row_names == 507 | row_names == 624| row_names == 691| row_names == 739| row_names == 745| row_names == 759 )
+#no kids, no cannabis, no smoking or ex, no dust exposure
+#saveRDS(ecrf4, file = "pathfeat4_5.rds")
+
+facs_residcluster <- facs_resid
+facs_residcluster2 <- as.data.frame(facs_residcluster)
+facs_residcluster2$row_names <- row.names(facs_residcluster2) 
+facs_residcluster2 <- facs_residcluster2 %>% filter(row_names == 196| row_names == 457 | row_names == 486| row_names == 497| row_names == 501| row_names == 507 | row_names == 624| row_names == 691| row_names == 739| row_names == 745| row_names == 759 )
+
+#saveRDS(ecrf4, file = "pathfeat4_5.rds")
+
+micro2 <- total2
+#micro3 <- as.data.frame(micro2)
+micro2$row_names <- row.names(micro2) 
+micro2 <- micro2 %>% filter(row_names == 196| row_names == 457 | row_names == 486| row_names == 497| row_names == 501| row_names == 507 | row_names == 624| row_names == 691| row_names == 739| row_names == 745| row_names == 759 )
+#saveRDS(ecrf4, file = "pathfeat4_5.rds")
+
+nanoTabLong2 <- nanoTabLong
+nanoTabLong3 <- as.data.frame(nanoTabLong2)
+nanoTabLong3$row_names <- row.names(nanoTabLong3) 
+nanoTabLong3 <- nanoTabLong3 %>% filter(row_names == "196_NS"| row_names == "457_NS" | row_names == "486_NS"| row_names == "497_NS"| row_names == "501_NS"| row_names == "507_NS" | row_names == "624_NS"| row_names == "691_NS"| row_names == "739_NS"| row_names == "745_NS"| row_names == "759_NS" )
+#saveRDS(ecrf4, file = "pathfeat4_5.rds")
+```
+
+```{r}
+
+#Chisquared test for categorical values
+
+#Chi squared
+chisq <- chisq.test(table(ecrf2$Smoking, ecrf2$labels))
+chisq
+table(ecrf2$Smoking, ecrf2$labels)
+#Pearson's Chi-squared test
+
+#data:  table(ecrf2$Smoking, ecrf2$labels)
+#X-squared = 59.216, df = 6, p-value = 6.493e-11
+
+round(chisq$residuals, 3)
+
+library(corrplot)
+corrplot(chisq$residuals, is.cor = FALSE, cl.lim = c(-3,6.1))
+
+contrib <- 100*chisq$residuals^2/chisq$statistic
+round(contrib, 3)
+
+# Visualize the contribution
+corrplot(contrib,, title= "Smoking", is.cor = FALSE, cl.lim = c(0,62.40))
+
+# printing the p-value
+chisq$p.value 
+
+
+#Chi squared
+chisq <- chisq.test(table(ecrf2$VaccineMMR, ecrf2$labels))
+chisq
+#Pearson's Chi-squared test
+
+#data:  table(ecrf2$VaccineMMR, ecrf2$labels)
+#X-squared = 21.253, df = 3, p-value = 9.328e-05
+
+
+round(chisq$residuals, 3)
+
+library(corrplot)
+corrplot(chisq$residuals, is.cor = FALSE, cl.lim = c(-3,6.1))
+
+contrib <- 100*chisq$residuals^2/chisq$statistic
+round(contrib, 3)
+
+# Visualize the contribution
+corrplot(contrib, title= "VaccineMMR", mar=c(0, 0, 1, 0), is.cor = FALSE,)
+corrplot(contrib, method = "number")
+
+# printing the p-value
+chisq$p.value #[1] 9.328429e-05
+
+#Chi squared
+chisq <- chisq.test(table(ecrf2$VaccineWhoopingCough, ecrf2$labels))
+chisq
+#Pearson's Chi-squared test
+
+#data:  table(ecrf2$VaccineWhoopingCough, ecrf2$labels)
+#X-squared = 17.986, df = 3, p-value = 0.0004429
+
+round(chisq$residuals, 3)
+
+library(corrplot)
+corrplot(chisq$residuals, is.cor = FALSE, cl.lim = c(-3,6.1))
+
+contrib <- 100*chisq$residuals^2/chisq$statistic
+round(contrib, 3)
+
+# Visualize the contribution
+corrplot(contrib, title= "VaccineWhoopingCough", mar=c(0, 0, 1, 0), is.cor = FALSE,)
+
+# printing the p-value
+chisq$p.value 
+
+#Chi squared
+chisq <- chisq.test(table(ecrf2$CMVPositiveSerology, ecrf2$labels))
+chisq #0.024
+
+round(chisq$residuals, 3)
+
+library(corrplot)
+corrplot(chisq$residuals, is.cor = FALSE, cl.lim = c(-3,6.1))
+
+contrib <- 100*chisq$residuals^2/chisq$statistic
+round(contrib, 3)
+
+# Visualize the contribution
+corrplot(contrib, title= "UsesCannabis", mar=c(0, 0, 1, 0), is.cor = FALSE,)
+
+# printing the p-value
+chisq$p.value #[1] 6.493048e-11
+
+  
+
+#Chi squared
+chisq <- chisq.test(table(ecrf2$Sex, ecrf2$labels))
+chisq #p=0.4325
+
+#Ttest age
+
+pairwise.t.test(ecrf2$Age, ecrf2$labels) # only sig with group 1 and 3 and 1 4 do average age of 1 ,2 , 3 , 4
+
+aggregate(Age~labels, ecrf2, FUN=mean)
+#labels      Age
+#1      1 48.94571
+#2      2 46.94680
+#3      3 41.83667
+#4      4 44.85891
+```
+
+```{r}
+#P.chl = subset_taxa(P.chl, VisitId=="V1")
+#control <- prune_samples(VisitId(P.chl) == "V1", P.chl)
+#sap
+#P.chl = subset_samples(P.chl, VisitId=="V1")
+
+
+```
+

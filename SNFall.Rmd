@@ -1,0 +1,524 @@
+---
+title: '051221'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+## Set up the wd and load required data
+setwd("~/Project/MIsnf/Submit")
+wd = getwd()
+knitr::opts_chunk$set(root.dir = wd)
+
+#Import packages
+library(dplyr)
+library(tidyverse)
+library(phyloseq)
+library(taxize)
+library(ape)
+library(cluster)
+library(ComplexHeatmap)
+suppressPackageStartupMessages(library(curatedMetagenomicData))
+library(matrixStats)
+library(pheatmap)
+library(dplyr)
+library(circlize)
+library(data.table)
+
+```
+
+```{r}
+Pathway <- read.csv(paste0(wd,"/pathwayabudance_stratified-cpm.tsv"), sep = "\t", header = T) #10359x1364
+#facs_resid = readRDS("facs_resid.rds")
+#nanoTabLong = readRDS("nanoTabLong.rds")
+#total2 = readRDS("total2.rds")
+
+#Remove rows that have more than 50% 0
+#Pathsub <- Pathway[rowMeans(Pathway!=0)>0.25, ] #1986x1364
+#Pathsub <- Pathway[rowMeans(Pathway!=0)>0.75, ] #602x1364
+Pathsub <- Pathway[which(rowMeans(Pathway!=0)>0.50), ] #1184x1364
+colnames(Pathsub)[1]<-"Pathway"
+
+#Remove rows whose row names contain unintegrated
+Pathsub2 <- Pathsub [-grep('UNINTEGRATED', Pathsub$Pathway),] #1134
+
+#Remove X and Abundance.CPM from colnames
+#colnames(Pathsub2) = gsub("X", "", colnames(Pathsub2))
+colnames(Pathsub2) = gsub("_Abundance.CPM", "", colnames(Pathsub2))
+rownames(Pathsub2) <- Pathsub2$Pathway
+Pathsub2 <- Pathsub2[,-1 ]
+
+#Transpose
+library(data.table)
+Pathsub3 <- transpose(Pathsub2)
+rownames(Pathsub3) <- colnames(Pathsub2)
+colnames(Pathsub3) <- rownames(Pathsub2)
+
+
+#add index as column
+Pathsub3 <- cbind(SampleID = rownames(Pathsub3), Pathsub3)
+rownames(Pathsub3) <- 1:nrow(Pathsub3)
+
+
+MI_sample <- read.table(paste0(wd,"/MI_sample_info2.txt"), sep = "\t", header = T)
+# merge two data frames by ID
+#samp2 <- merge(MI_sample,samp,by="SampleID")
+
+# MI sample IDs that start with "16" are missing a zero before it, clean here
+#MI_sample$SampleID=as.character(MI_sample$X.Sample.)  ##error
+MI_sample$SampleID=as.character(MI_sample$ï..Sample)  
+
+
+for(i in 1:nrow(MI_sample)){
+  if(substr(MI_sample$SampleID[i], 1,1)=="1"){
+    MI_sample$SampleID[i]=paste0("0", MI_sample$SampleID[i])
+  }
+} 
+
+
+#order by donorid
+MI_sample$SampleID <- sub("^", "X", MI_sample$SampleID )
+#MI_sample2 <- MI_sample %>% filter(VisitId == "V1")
+MI_sample2 <- MI_sample %>% dplyr::filter(VisitId == "V1")
+MI_sample3 <- MI_sample2[order(MI_sample2$DonorId),]
+MI_sample4 <- subset(MI_sample3, select = -c(ï..Sample,VisitId,AGE,SEX))
+dim(Pathsub3) #1363x1135
+dim((MI_sample4)) #938x2
+length(intersect(colnames(Pathsub2), MI_sample4$SampleID)) #938
+
+Path <- merge(Pathsub3,MI_sample4,by="SampleID") #938 in common because only visit ID
+Pathsnf <- Path[order(Path$DonorId),]
+
+
+```
+
+```{r}
+#Import files
+facs_ethical = readRDS("facs2.RData") #956x170
+load(paste(wd, "/facs_annotation.RData", sep = "")) # we do have named gatings! #166x3 # load("facs_annotation.RData") for big purple
+facs_annotation <- data.frame(facs_annotation) #simpler as df
+
+#Check which rows are missing
+setdiff(colnames(facs_ethical), facs_annotation$FACS.NAME)
+
+#Make new dataframe with rows that are missing and add to facs_annotation
+facs_annotation2 <-subset(facs_annotation, select = -Type)
+newrows <- data.frame(c("N_Plasmocytes.panel6", "N_CD8bposCD4pos.panel5", "N_CXCR3pos.panel9"),
+                      c("Plasmocytes", "CD8 in CD4+ cells", "CXCR3+ cells"))
+names(newrows) <- c("FACS.NAME", "FACS.DESC")
+facs_annotation2 <- rbind(facs_annotation2, newrows)
+
+# now we are only missing SUBJID
+
+setdiff(colnames(facs_ethical), facs_annotation2$FACS.NAME)
+
+# removed them from facs_ethical
+facs_ethical <- facs_ethical[,c("SUBJID", intersect(colnames(facs_ethical), facs_annotation2$FACS.NAME))] 
+rownames(facs_annotation2) <- facs_annotation2$FACS.NAME
+facs_annotation2 <- facs_annotation2[colnames(facs_ethical),] # put names in same order as facs_ethical #170x2
+```
+
+```{r}
+#next props data
+load(paste(wd, "/proportions.RData", sep = "")) #called props_of_total
+
+#next nano tab
+
+nanoTab <- read.table(paste(wd, "/NanoStringData.txt", sep = ""), header = T)
+nano_subs <- as.character(unique(nanoTab$id))
+
+#next ecrf
+load(paste(wd, "/ecrf.RData", sep = ""))
+ecrf <- cbind(ecrf[,"SUBJID"], ecrf) # bit redundant but add subjid to first col of ecrf
+```
+
+```{r}
+#Import microbiome data
+#MI_metaphlan <- read.table(paste0(wd,"/MI_metaphlan_merged_abundance_table.txt"), sep = "\t", header = T)
+#taxa <- read.csv(file = 'taxa.csv')
+
+
+#Transpose
+library(data.table)
+OTUdf2 <- transpose(OTUdf)
+rownames(OTUdf2) <- colnames(OTUdf)
+colnames(OTUdf2) <- rownames(OTUdf)
+
+
+#add index as column
+OTUdf2 <- cbind(SampleID = rownames(OTUdf2), OTUdf2)
+rownames(OTUdf2) <- 1:nrow(OTUdf2)
+
+
+total <- merge(OTUdf2,MI_sample4,by="SampleID") #938 in common because only visit ID
+total2 <- total[order(total$DonorId),]
+
+ 
+```
+
+```{r}
+####
+#### subjid totals
+#### facs MFI = 956 subs
+#### Props data = 956 subs
+#### NanoTab = 804 subs  # I get 5628x562!
+#### ecrf = 816 subs
+####
+#### Need to find the union of all these
+####
+a=facs_ethical$SUBJID #956
+b=as.character(props_of_total$SUBJID) #956
+c=nano_subs #804
+d = as.character(ecrf$SUBJID) #816
+e=as.character(total2$DonorId) #938
+f=as.character(Pathsnf$DonorId) #938
+all_subs = Reduce(intersect, list(a,b,c,d,e,f)) #choose the common ones, 794
+```
+
+```{r}
+#theres actually only 803 and now we have a vector with that information
+#make all the data structures dataframes, and make the subjid the rownames MAKE SURE ITS THE SAME ORDER
+#for nanotab make the subjids the subjid_stim so the rownames stay unique
+#now it is 794
+
+# 1. facs ethical
+facs_ethical = data.frame(facs_ethical) #df are easier to work with
+rownames(facs_ethical) <- facs_ethical$SUBJID #set subjid as index
+facs_ethical = facs_ethical[,-1] #remove subjid column
+facs_ethical = facs_ethical[all_subs,] #set all sub as index?
+facs_ethical[is.na(facs_ethical)] <- 0
+
+# 2. props total
+props_of_total <- data.frame(props_of_total)
+rownames(props_of_total) <- as.character(props_of_total$SUBJID)# set subjid as index
+props_of_total = props_of_total[,-1] #remove subjid
+props_of_total = props_of_total[all_subs,] #set all subs as index
+
+# 3. Nano tab
+stimuli <- as.character(unique(nanoTab$stimulus))
+nanoTabNew <- nanoTab[1,2:(ncol(nanoTab)-1)]  #skip id and stimulus column
+for(i in 1:length(stimuli)){
+  nano = subset(nanoTab, stimulus == stimuli[i])
+  rownames(nano) <- as.character(nano$id)
+  nano <- nano[,-1] #remove stimulus column
+  nano = nano[all_subs,] #add all subs as index
+  rownames(nano) <- paste0(rownames(nano), "_", nano$stimulus)
+  nano <- nano[,1:(ncol(nano)-1)]    #each time nano is being changed in line 107
+ 
+  nanoTabNew <- rbind(nanoTabNew, nano) 
+}
+nanoTabNew = nanoTabNew[-1,] 
+
+# 4. ecrf
+ecrf <- data.frame(ecrf)
+rownames(ecrf) <- as.character(ecrf$SUBJID)
+ecrf = ecrf[,-1]
+ecrf = ecrf[all_subs,]
+
+```
+
+```{r}
+#5.MI
+rownames(total2) <- total2$DonorId #set donorid as index
+total2 = total2[,-214] #remove donorid column
+total2 = total2[,-1]
+total2 = total2[all_subs,] #set all sub as index?
+total2[is.na(total2)] <- 0 #794x213
+
+
+#5.MI Pathway
+rownames(Pathsnf) <- Pathsnf$DonorId #set donorid as index
+Pathsnf = Pathsnf[,-214] #remove donorid column
+Pathsnf = Pathsnf[,-1]
+Pathsnf = Pathsnf[all_subs,] #set all sub as index?
+Pathsnf[is.na(Pathsnf)] <- 0 #794x1134
+```
+
+```{r}
+## Load libraries
+library(ComplexHeatmap)
+library(psych)
+library(circlize)
+library(ggplot2)
+library(matrixStats)
+library(dendextend)
+library(data.table)
+library(gridExtra)
+
+## Create annotations for Age, Sex, CMV, Smoking 
+
+ecrfData <- data.frame(Age=ecrf$Age, Sex=ecrf$Sex, CMV=ecrf$CMVPositiveSerology, Smoking=ecrf$Smoking)
+rownames(ecrfData) <- rownames(ecrf)
+allAnnots <- columnAnnotation(Age = ecrfData$Age, 
+                              CMV = ecrfData$CMV, 
+                              Smoking = ecrfData$Smoking, 
+                              Sex = ecrfData$Sex, show_legend = T,
+                              annotation_name_side="left") ### I put them on the left to avoid the smush of text
+```
+
+```{r}
+library(lme4)
+library(dplyr)
+
+
+##
+
+# try to model random effects
+all = cbind(facs_ethical, ecrf) #merge facs and ecrf
+
+facs_resid <- matrix(0, nrow=nrow(facs_ethical), ncol=1) #matrix with 1 column and all 0
+res = data.frame(name=NA, prop_var=NA) #empty df
+for(i in 1:ncol(facs_ethical)){
+fm1 = lmer(all[,i] ~ 1 + (1|DayOfSampling), all)  #Fit a linear mixed-effects model (LMM) to data, via REML or maximum likelihood model, |?
+est = as.data.frame(VarCorr(fm1))[c("grp", "vcov")] #This function calculates the estimated variances, standard deviations, and correlations between the random-effects terms in a mixed-effects model, of class '>merMod (linear, generalized or nonlinear). The within-group error variance and standard deviation are also calculated.
+res_var <- est$vcov[est$grp == "Residual"] #?
+est <- left_join(tibble(grp = "DayOfSampling"), est, by = "grp")
+prop_var = (100 * est$vcov / c(est$vcov + res_var))
+adder=data.frame(name=colnames(facs_ethical)[i], prop_var= prop_var)
+res=rbind(res,adder)
+facs_resid <- cbind(facs_resid, residuals(fm1))
+}  #boundary (singular) fit: see ?isSingular
+res=res[-1,]
+facs_resid = facs_resid[,-1]
+colnames(facs_resid) = colnames(facs_ethical)
+rownames(facs_resid) = rownames(facs_ethical)
+
+```
+
+```{r}
+gene_vars <- colVars(data.matrix(nanoTabNew))
+nanoTab_filt <- nanoTabNew[,gene_vars>1]
+
+# flip nano into more columns...
+nanoTabLong <- nanoTab_filt[grepl(stimuli[1], rownames(nanoTab_filt)),]
+colnames(nanoTabLong) <- paste0(colnames(nanoTabLong), "_", stimuli[1])
+
+for( i in 2:length(stimuli)){
+  new <- nanoTab_filt[grepl(stimuli[i], rownames(nanoTab_filt)),]
+  colnames(new) <- paste0(colnames(new), "_", stimuli[i])
+  nanoTabLong <- cbind(nanoTabLong, new)
+}
+```
+
+```{r}
+
+#SNF+Heatmap+UMAP
+
+library(tidyverse)
+library(compositions)
+library(cowplot)
+library(gridExtra)
+
+facs_resid=readRDS("facs_resid.rds")
+nanoTabLong=readRDS("nanoTabLong.rds")
+total2=readRDS("total2.rds")
+Pathsnf=readRDS("Pathsnf.rds")
+ecrf=readRDS("ecrf.rds")
+
+#SNF
+
+#K = 20;		# number of neighbors, usually (10~30)
+#alpha = 0.5;  	# hyperparameter, usually (0.3~0.8)
+#T = 10; 	# Number of Iterations, usually (10~20)
+
+#facs_resid=readRDS("facs_resid.rds")
+#nanoTabLong=readRDS("nanoTabLong.rds")
+#total2=readRDS("total2.rds")
+#Pathsnf=readRDS("Pathsnf.rds")
+#ecrf <- readRDS("ecrf.rds")
+
+
+library(SNFtool)
+
+Data1 = facs_resid #facs was already normalized
+Data2 = nanoTabLong #nanostring s array already normalized 
+Data3 = total2
+Data4 = Pathsnf
+
+
+#Calculate distance matrices
+dist1 <- as.matrix(dist(Data1))
+dist2 <- as.matrix(dist(Data2))
+dist3 <- as.matrix(dist(Data3))
+dist4 <- as.matrix(dist(Data4))
+
+
+## next, construct similarity graphs
+W1 <- affinityMatrix(dist1, K = 20, sigma = 0.5)
+W2 <- affinityMatrix(dist2, K = 20, sigma = 0.5)
+W3 <- affinityMatrix(dist3, K = 20, sigma = 0.5)
+W4 <- affinityMatrix(dist4, K = 20, sigma = 0.5)
+
+
+## next, we fuse all the graphs then the overall matrix can be computed by similarity network fusion(SNF):
+W = SNF(list(W1,W2,W3,W4), 20, 20)  # Dim names not consistent across all matrices in Wall. Returned matrix will have no dim names.
+C = 4
+
+
+labels = spectralClustering(W, C) # the final subtypes information
+
+ha1 = columnAnnotation(df=data.frame(labels))
+
+Wh=W
+normalize <- function(X) X/rowSums(X) #divide by sum of column
+ind <- sort(as.vector(labels), index.return = TRUE) #use for grouping later
+ind <- ind$ix 
+diag(Wh) <- median(as.vector(W)) #treat diagonal (every person to themselves) calculate the median of w, take median of every value in the matrix and devide by sum of columns and transpose them, does not functionally change anything
+Wh <- normalize(Wh) 
+Wh <- Wh + t(Wh)  #transpose
+
+ha1 = columnAnnotation(df=data.frame(group=factor(labels[ind]),
+                                     age = ecrf$Age[ind]))
+
+snf_map=grid.grabExpr(draw(
+  Heatmap(Wh[ind,ind], column_title = "SNF", 
+          col =  colorRamp2(c(0,0.05), c("white", "red")),
+          show_column_names = F,
+          top_annotation = ha1, 
+          cluster_rows = F, cluster_columns = F,
+          show_row_names = F))
+) 
+Wh[ind,ind]
+
+
+png("SNFplotsfacsnanoC3setseed.png", height = 5, width = 7, units="in", res=150)
+grid.arrange(snf_map) 
+dev.off()
+
+##UMAP
+
+library(umap)
+set.seed(42)
+snfumap = umap(as.matrix(W))
+snfumap
+#layout holds a matrix with coordinates
+head(snfumap$layout, 3)
+snfumap$color = factor(labels)
+
+umap_df <- data.frame(x = snfumap$layout[,1],
+                   y = snfumap$layout[,2],
+                   labels = snfumap$color)
+
+
+png("UMAPC3nanofacssetseed.png", height = 5, width = 7, units="in", res=150)
+ggplot(umap_df, aes(x, y, colour = labels)) +
+  geom_point()
+dev.off()
+```
+
+```{r}
+#Features that drive the variation
+
+#Change names of Pathway file
+colRename<-function(x){  
+  for(i in 1:ncol(x)){
+    colnames(x)[i] <- paste("Pathway ",i,sep="")
+  }  
+  return(x)
+}  
+
+Pathsnf2 <- colRename(Pathsnf)
+
+#Change names of Micro file
+colRename<-function(x){  
+  for(i in 1:ncol(x)){
+    colnames(x)[i] <- paste("Taxa ",i,sep="")
+  }  
+  return(x)
+}  
+
+total3 <- colRename(total2)
+
+
+##Identify features
+
+clusts = as.character(umap_df$labels)
+nclusts = length(unique(clusts))
+datas=list(facs_resid, nanoTabLong, total3, Pathsnf2)
+names(datas)=c('flow', 'gene', 'taxa', "Pathway")
+umap_df$color = factor(labels)
+
+
+
+for(j in 1:length(datas)){
+  immune_res <- data.frame(feature=NA, comp=NA, fc=NA, p.val=NA)
+  data_use=datas[[j]]
+  for (i in 1:ncol(data_use)){
+    #curr = scale(facs_resid)[,i]
+    curr = data_use[,i]
+    curr = curr + abs(min(curr))
+    
+    poss=unique(clusts)
+    for(kk in 1:nclusts){
+      x1 = mean(curr[clusts==poss[kk]])
+      xn1 = mean(curr[clusts!=poss[kk]])
+      mult1=1
+      if(xn1>x1){mult1=-1}
+      fc1 = (abs(xn1-x1)/abs(x1))
+      fc1=fc1*mult1
+      
+      p.val <- round(t.test(curr[clusts==poss[kk]], curr[clusts!=poss[kk]])$p.val,4)
+      
+      adder = data.frame(feature=colnames(data_use)[i],
+                         comp=poss[kk], fc = fc1, p.val=p.val)
+      immune_res <- rbind(immune_res, adder)
+    }
+  }
+  immune_res=immune_res[-1,]
+  immune_res=immune_res[order(immune_res$p.val, decreasing=F),]
+  immune_res=immune_res[order(immune_res$fc, decreasing=T),]
+  
+  immune_df=immune_res %>% # take the dataframe
+    group_by(comp) %>% # group it by the grouping variable
+    slice(1:5) # and pick rows 1 to 3 per group #changed this
+ 
+  
+  glist = list()
+  for( jj in 1:nrow(immune_df)){
+    
+    feat = as.character(immune_df$feature)[jj]
+    
+    data=data_use
+    
+    if(names(datas)[j]=="taxa"){
+      umap_df$Feature <- as.numeric(clr(data[,feat]))
+    } else {
+      umap_df$Feature <- scale(data[,feat])
+    }
+    
+    umap_df$Feature <- umap_df$Feature + abs(min(umap_df$Feature))
+    
+    
+    g1=ggplot() +
+      geom_point(aes(x, y, color=Feature, shape = color), data= umap_df) +
+      #scale_colour_manual(values=coul) +
+      scale_color_gradient2(low="white", high="navy", mid="lightcoral", midpoint = median(umap_df$Feature))+
+      theme_minimal() + theme(legend.position = "top")    
+    
+    
+    
+    min_min = min(predict(loess(Feature ~ x, data=umap_df)))
+    max_max = max(predict(loess(Feature ~ x, data=umap_df)))
+    g2=ggplot(umap_df, aes(x, Feature)) + #geom_smooth() +
+      geom_ribbon(aes(ymin = min_min,ymax = predict(loess(Feature ~ x))),
+                  alpha = 0.3,fill = 'red3') + ggtitle(feat) + 
+      theme_minimal() +
+      coord_cartesian(ylim=c(min_min-0.5, max_max+0.5))
+    
+    
+    glist[[jj]] = arrangeGrob(g2,g1, nrow=2, heights = c(1,3))
+    
+  }
+  namer = paste0("plots/C4555", names(datas)[j], "_feature_markersumap_df.pdf")
+  pdf(namer, height = 25, width = 25)
+  howdy = grid.arrange(
+    plot_grid(plotlist = glist, nrow=5)
+  )
+  dev.off()
+}
+
+```
+
